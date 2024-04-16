@@ -5,11 +5,12 @@ use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
 use sdl2::pixels::Color;
+use sdl2::rect::{Point};
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::f32::consts::PI;
 
-use ringbuf::{Consumer, HeapRb, SharedRb};
+use ringbuf::{Consumer, Producer, HeapRb, SharedRb};
 
 #[derive(Copy, Clone)]
 enum Waveform {
@@ -28,6 +29,7 @@ struct AudioContext {
 
 struct Oscillator {
     ctx: Consumer<AudioContext, Arc<SharedRb<AudioContext, Vec<MaybeUninit<AudioContext>>>>>,
+    audio_out: Producer<f32, Arc<SharedRb<f32, Vec<MaybeUninit<f32>>>>>,
     sample_rate: f32,
     i: f32,
     phasor: f32,
@@ -59,7 +61,7 @@ impl AudioCallback for Oscillator {
                 *x = match ctx.waveform {
                     Waveform::Sine => (2.0 * PI * self.phasor).sin() * ctx.volume,
                     Waveform::Square => if self.phasor < 0.5 { -1.0 * ctx.volume } else { 1.0 * ctx.volume },
-                    Waveform::Triangle => if self.phasor < 0.5 { 4.0 * self.phasor * ctx.volume} else { ((4.0 * (1.0 - self.phasor)) - 1.0) * ctx.volume },
+                    Waveform::Triangle => if self.phasor < 0.5 { (4.0 * self.phasor - 1.0) * ctx.volume} else { ((4.0 * (1.0 - self.phasor)) - 1.0) * ctx.volume },
                     Waveform::Sawtooth => (2.0 * self.phasor - 1.0) * ctx.volume,
                 };
 
@@ -69,10 +71,12 @@ impl AudioCallback for Oscillator {
                 *x = 0.0;
             }
         }
+
+        let _ = self.audio_out.push_slice(out);
     }
 }
 
-const SCREEN_WIDTH: i32 = 512;
+const SCREEN_WIDTH: i32 = 2048;
 const SCREEN_HEIGHT: i32 = 512;
 
 pub fn run() -> Result<(), String> {
@@ -88,12 +92,16 @@ pub fn run() -> Result<(), String> {
 
     let ring_buf = HeapRb::<AudioContext>::new(2);
     let (mut prod, cons) = ring_buf.split();
+    
+    let audio_out_buf = HeapRb::<f32>::new(2048);
+    let (prod_out, mut cons_out) = audio_out_buf.split();
 
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
         println!("{:?}", spec);
 
         Oscillator {
             ctx: cons,
+            audio_out: prod_out,
             i: 0.0,
             sample_rate: 44_100.0,
             phasor: 0.0,
@@ -123,8 +131,12 @@ pub fn run() -> Result<(), String> {
 
     let mut event_pump = sdl_context.event_pump()?;
     let mut waveform = Waveform::Sine;
+    let mut scope = (0..2048).map(|_| 0.0).collect::<Vec<f32>>();
 
     'running: loop {
+        canvas.set_draw_color(color);
+        canvas.clear();
+
         for event in event_pump.poll_iter() {
             match event {
                 Event::KeyDown { keycode: Some(Keycode::A), .. } => waveform = Waveform::Sine,
@@ -145,7 +157,7 @@ pub fn run() -> Result<(), String> {
 
         if buttons.contains(&MouseButton::Left) && prev_buttons.contains(&MouseButton::Left) {
             let volume = mouse_state.y() as f32 / SCREEN_WIDTH as f32;
-            let freq = ((mouse_state.x() as f32 / SCREEN_HEIGHT as f32) * 4950.) + 50.;
+            let freq = ((mouse_state.x() as f32 / SCREEN_HEIGHT as f32) * 1000.) + 20.;
             let new_ctx = AudioContext {
                 freq,
                 volume,
@@ -166,8 +178,14 @@ pub fn run() -> Result<(), String> {
             _ = prod.push(new_ctx);
         }
 
-        canvas.set_draw_color(color);
-        canvas.clear();
+        
+        let _out_len = cons_out.pop_slice(&mut scope[..]);
+
+        canvas.set_draw_color(Color::RGB(100, 255, 100));
+
+        for (x, sample) in scope.iter().enumerate() {
+            canvas.draw_point(Point::new(x as i32, ((SCREEN_HEIGHT / 2) as f32 + (sample * 100.0)) as i32));
+        }
         canvas.present();
         prev_buttons = buttons;
     }
