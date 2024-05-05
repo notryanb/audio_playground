@@ -45,12 +45,12 @@ impl Oscillator {
             return 0.0;
         }
 
-        let mut fr = phs * WAVETABLE_SAMPLE_COUNT as f32;
-        let i = fr.floor() as usize;
-        fr = fr - i as f32;
+        let table_value = phs * WAVETABLE_SAMPLE_COUNT as f32;
+        let i = table_value.floor() as usize;
+        let fract = table_value.fract() as f32;
         let x0 = self.sin_wavetable[i];
         let x1 = self.sin_wavetable[(i + 1) % WAVETABLE_SAMPLE_COUNT];
-        (1.0 - fr) * x0 + fr * x1 /* weighted LERP between the two samples */
+        (1.0 - fract) * x0 + fract * x1 /* weighted LERP between the two samples */
     }
 }
 
