@@ -12,12 +12,15 @@ use std::f32::consts::PI;
 
 use ringbuf::{Consumer, Producer, HeapRb, SharedRb};
 
+const WAVETABLE_SAMPLE_COUNT: usize = 512;
+
 #[derive(Copy, Clone)]
 enum Waveform {
     Sine,
     Square,
     Triangle,
     Sawtooth,
+    SineWavetable,
 }
 
 struct AudioContext {
@@ -33,6 +36,18 @@ struct Oscillator {
     sample_rate: f32,
     i: f32,
     phasor: f32,
+    sin_wavetable: Vec<f32>,
+}
+
+impl Oscillator {
+    pub fn wavetable_eval(&self, phs: f32) -> f32 {
+        let mut fr = phs * WAVETABLE_SAMPLE_COUNT as f32;
+        let i = fr.floor() as usize;
+        fr = fr - i as f32;
+        let x0 = self.sin_wavetable[i];
+        let x1 = self.sin_wavetable[(i + 1) % WAVETABLE_SAMPLE_COUNT];
+        (1.0 - fr) * x0 + fr * x1
+    }
 }
 
 impl AudioCallback for Oscillator {
@@ -63,6 +78,7 @@ impl AudioCallback for Oscillator {
                     Waveform::Square => if self.phasor < 0.5 { -1.0 * ctx.volume } else { 1.0 * ctx.volume },
                     Waveform::Triangle => if self.phasor < 0.5 { (4.0 * self.phasor - 1.0) * ctx.volume} else { ((4.0 * (1.0 - self.phasor)) - 1.0) * ctx.volume },
                     Waveform::Sawtooth => (2.0 * self.phasor - 1.0) * ctx.volume,
+                    Waveform::SineWavetable => self.wavetable_eval(self.phasor) * ctx.volume,
                 };
 
             }
@@ -90,6 +106,7 @@ pub fn run() -> Result<(), String> {
         samples: None,
     };
 
+
     let ring_buf = HeapRb::<AudioContext>::new(2);
     let (mut prod, cons) = ring_buf.split();
     
@@ -99,12 +116,16 @@ pub fn run() -> Result<(), String> {
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
         println!("{:?}", spec);
 
+        let phase_angle_step = 1.0f32 / WAVETABLE_SAMPLE_COUNT as f32;
+        let sin_wavetable = (0..WAVETABLE_SAMPLE_COUNT).map(|i| (2.0 * PI * i as f32 * phase_angle_step).sin()).collect::<Vec<f32>>();
+
         Oscillator {
             ctx: cons,
             audio_out: prod_out,
             i: 0.0,
             sample_rate: 44_100.0,
             phasor: 0.0,
+            sin_wavetable,
         }
     })?;
 
@@ -143,6 +164,7 @@ pub fn run() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(Keycode::S), .. } => waveform = Waveform::Square,
                 Event::KeyDown { keycode: Some(Keycode::D), .. } => waveform = Waveform::Triangle,
                 Event::KeyDown { keycode: Some(Keycode::F), .. } => waveform = Waveform::Sawtooth,
+                Event::KeyDown { keycode: Some(Keycode::G), .. } => waveform = Waveform::SineWavetable,
                 Event::Quit { .. }
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
