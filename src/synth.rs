@@ -41,12 +41,16 @@ struct Oscillator {
 
 impl Oscillator {
     pub fn wavetable_eval(&self, phs: f32) -> f32 {
+        if phs < 0.0 || phs >= 1.0 {
+            return 0.0;
+        }
+
         let mut fr = phs * WAVETABLE_SAMPLE_COUNT as f32;
         let i = fr.floor() as usize;
         fr = fr - i as f32;
         let x0 = self.sin_wavetable[i];
         let x1 = self.sin_wavetable[(i + 1) % WAVETABLE_SAMPLE_COUNT];
-        (1.0 - fr) * x0 + fr * x1
+        (1.0 - fr) * x0 + fr * x1 /* weighted LERP between the two samples */
     }
 }
 
