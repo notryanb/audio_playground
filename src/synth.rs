@@ -25,10 +25,10 @@ impl Wavetable {
     pub fn new(waveform: Waveform, sample_rate: f32) -> Self {
         let nyquist = sample_rate / 2.0; 
         let mut freq = MIN_FREQ;
-        let table_entry_len = ((nyquist / MIN_FREQ) + 1.0).log2();
-        let mut wavetable: Vec<WavetableEntry> = Vec::with_capacity(table_entry_len as usize);
+        let table_entry_len = (nyquist / MIN_FREQ).log2() as usize + 1;
+        let mut wavetable: Vec<WavetableEntry> = Vec::with_capacity(table_entry_len);
 
-        for n in 0..(table_entry_len as usize) {
+        for n in 0..table_entry_len {
             wavetable.push(WavetableEntry::new(sample_rate, freq));
             freq *= 2.0;
         }
@@ -39,10 +39,11 @@ impl Wavetable {
         }
     }
 
+    /* TODO - can I return a reference to the actual wavtable instead of index? */
     pub fn tbl_index(&self, freq: f32) -> usize {
-        for i in 0..self.wavetable.len() {
-            /* Linear search for wavetable entry */
-            if freq < self.wavetable[i].max_freq {
+        for (i, wt) in self.wavetable.iter().enumerate() {
+            /* Linear search for wavetable entry. Improve with a Binary Search */
+            if freq < wt.max_freq {
                 return i;
             }
         }
@@ -70,14 +71,15 @@ impl WavetableEntry {
             return 0.0;
         }
 
-        let table_value = phs * WAVETABLE_SAMPLE_COUNT as f32;
+        let table_value = phs * WAVETABLE_SIZE as f32;
         let i = table_value.floor() as usize;
         let fract = table_value.fract() as f32;
         let x0 = self.buffer[i];
-        let x1 = self.buffer[(i + 1) % WAVETABLE_SAMPLE_COUNT];
+        let x1 = self.buffer[(i + 1) % WAVETABLE_SIZE];
         (1.0 - fract) * x0 + fract * x1 /* weighted LERP between the two samples */
     }
 
+    // For Sawtooth Fourier Coefficient
     fn coeff(k: f32) -> f32 {
         if k % 2.0 == 0.0 {
             -1.0 / k
@@ -90,7 +92,12 @@ impl WavetableEntry {
         let nyquist = sample_rate / 2.0; 
         let step = 2.0 * PI / WAVETABLE_SIZE as f32;
         let mut max = 0.0;
-        let mut buffer: Vec<f32> = Vec::new();
+        let mut buffer: Vec<f32> = Vec::with_capacity(WAVETABLE_SIZE);
+
+        /* TODO - use vec![] or another rusty way to do this */
+        for _ in 0..WAVETABLE_SIZE {
+            buffer.push(0.0);
+        }
 
         for i in 0..WAVETABLE_SIZE {
             let phi = i as f32 * step;
@@ -98,8 +105,9 @@ impl WavetableEntry {
             /* Add up harmonics */
             buffer[i] = 0.0;
             for k in 1..(nyquist as usize) {
-                if k as f32 * freq < nyquist {
-                    buffer[i] += WavetableEntry::coeff(k as f32) * (k as f32 * phi).sin();
+                buffer[i] += WavetableEntry::coeff(k as f32) * (k as f32 * phi).sin();
+                if k as f32 * freq >= nyquist {
+                    break;
                 }
             }
 
@@ -109,8 +117,8 @@ impl WavetableEntry {
             }
         }
 
+        /* Normalize amplitude -1..1 */
         for i in 0..WAVETABLE_SIZE {
-            /* Normalize amplitude -1..1 */
             if max > 0.0 {
                 buffer[i] /= max;
             }
@@ -219,9 +227,10 @@ pub fn run() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     let audio_subsystem = sdl_context.audio()?;
+    let sample_rate = 44_100.0;
 
     let desired_spec = AudioSpecDesired {
-        freq: Some(44_100),
+        freq: Some(sample_rate as i32),
         channels: Some(1),
         samples: None,
     };
@@ -237,13 +246,13 @@ pub fn run() -> Result<(), String> {
 
         let phase_angle_step = 1.0f32 / WAVETABLE_SAMPLE_COUNT as f32;
         let sin_wavetable = (0..WAVETABLE_SAMPLE_COUNT).map(|i| (2.0 * PI * i as f32 * phase_angle_step).sin()).collect::<Vec<f32>>();
-        let saw_wavetable = Wavetable::new(Waveform::Sawtooth, 0.0);
+        let saw_wavetable = Wavetable::new(Waveform::Sawtooth, sample_rate);
 
         Oscillator {
             ctx: cons,
             audio_out: prod_out,
             i: 0.0,
-            sample_rate: 44_100.0,
+            sample_rate,
             phasor: 0.0,
             sin_wavetable,
             wavetable: saw_wavetable,
@@ -286,7 +295,6 @@ pub fn run() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(Keycode::D), .. } => waveform = Waveform::Triangle,
                 Event::KeyDown { keycode: Some(Keycode::F), .. } => waveform = Waveform::Sawtooth,
                 Event::KeyDown { keycode: Some(Keycode::G), .. } => waveform = Waveform::SineWavetable,
-                /* sawtooth wavtable is broken */
                 Event::KeyDown { keycode: Some(Keycode::H), .. } => waveform = Waveform::SawtoothWavetable,
                 Event::Quit { .. }
                 | Event::KeyDown {
