@@ -13,6 +13,113 @@ use std::f32::consts::PI;
 use ringbuf::{Consumer, Producer, HeapRb, SharedRb};
 
 const WAVETABLE_SAMPLE_COUNT: usize = 512;
+const MIN_FREQ: f32 = 20.0;
+const WAVETABLE_SIZE: usize = 4096;
+
+pub struct Wavetable { 
+    waveform: Waveform,
+    wavetable: Vec<WavetableEntry>,
+}
+
+impl Wavetable {
+    pub fn new(waveform: Waveform, sample_rate: f32) -> Self {
+        let nyquist = sample_rate / 2.0; 
+        let mut freq = MIN_FREQ;
+        let table_entry_len = ((nyquist / MIN_FREQ) + 1.0).log2();
+        let mut wavetable: Vec<WavetableEntry> = Vec::with_capacity(table_entry_len as usize);
+
+        for n in 0..(table_entry_len as usize) {
+            wavetable.push(WavetableEntry::new(sample_rate, freq));
+            freq *= 2.0;
+        }
+
+        Self {
+            waveform,
+            wavetable,
+        }
+    }
+
+    pub fn tbl_index(&self, freq: f32) -> usize {
+        for i in 0..self.wavetable.len() {
+            /* Linear search for wavetable entry */
+            if freq < self.wavetable[i].max_freq {
+                return i;
+            }
+        }
+
+        // use last table if freq is too high
+        self.wavetable.len() - 1
+    }
+}
+
+pub struct WavetableEntry {
+    pub max_freq: f32,
+    pub buffer: Vec<f32>,
+}
+
+impl WavetableEntry {
+    pub fn new(sample_rate: f32, freq: f32) -> Self {
+        Self {
+            max_freq: freq,
+            buffer: WavetableEntry::generate_buffer(sample_rate, freq),
+        }
+    }
+    
+    pub fn wavetable_eval(&self, phs: f32) -> f32 {
+        if phs < 0.0 || phs >= 1.0 {
+            return 0.0;
+        }
+
+        let table_value = phs * WAVETABLE_SAMPLE_COUNT as f32;
+        let i = table_value.floor() as usize;
+        let fract = table_value.fract() as f32;
+        let x0 = self.buffer[i];
+        let x1 = self.buffer[(i + 1) % WAVETABLE_SAMPLE_COUNT];
+        (1.0 - fract) * x0 + fract * x1 /* weighted LERP between the two samples */
+    }
+
+    fn coeff(k: f32) -> f32 {
+        if k % 2.0 == 0.0 {
+            -1.0 / k
+        } else {
+            1.0 / k
+        }
+    }
+
+    pub fn generate_buffer(sample_rate: f32, freq: f32) -> Vec<f32> {
+        let nyquist = sample_rate / 2.0; 
+        let step = 2.0 * PI / WAVETABLE_SIZE as f32;
+        let mut max = 0.0;
+        let mut buffer: Vec<f32> = Vec::new();
+
+        for i in 0..WAVETABLE_SIZE {
+            let phi = i as f32 * step;
+            
+            /* Add up harmonics */
+            buffer[i] = 0.0;
+            for k in 1..(nyquist as usize) {
+                if k as f32 * freq < nyquist {
+                    buffer[i] += WavetableEntry::coeff(k as f32) * (k as f32 * phi).sin();
+                }
+            }
+
+            /* Update max amplitude for normalization */
+            if buffer[i].abs() > max {
+                max = buffer[i].abs();
+            }
+        }
+
+        for i in 0..WAVETABLE_SIZE {
+            /* Normalize amplitude -1..1 */
+            if max > 0.0 {
+                buffer[i] /= max;
+            }
+        }
+
+        buffer
+    }
+}
+
 
 #[derive(Copy, Clone)]
 enum Waveform {
@@ -21,6 +128,7 @@ enum Waveform {
     Triangle,
     Sawtooth,
     SineWavetable,
+    SawtoothWavetable,
 }
 
 struct AudioContext {
@@ -37,6 +145,7 @@ struct Oscillator {
     i: f32,
     phasor: f32,
     sin_wavetable: Vec<f32>,
+    wavetable: Wavetable,
 }
 
 impl Oscillator {
@@ -53,6 +162,7 @@ impl Oscillator {
         (1.0 - fract) * x0 + fract * x1 /* weighted LERP between the two samples */
     }
 }
+
 
 impl AudioCallback for Oscillator {
     type Channel = f32;
@@ -83,8 +193,14 @@ impl AudioCallback for Oscillator {
                     Waveform::Triangle => if self.phasor < 0.5 { (4.0 * self.phasor - 1.0) * ctx.volume} else { ((4.0 * (1.0 - self.phasor)) - 1.0) * ctx.volume },
                     Waveform::Sawtooth => (2.0 * self.phasor - 1.0) * ctx.volume,
                     Waveform::SineWavetable => self.wavetable_eval(self.phasor) * ctx.volume,
+                    Waveform::SawtoothWavetable => {
+                        let freq = ctx.freq;
+                        let idx = self.wavetable.tbl_index(freq);
+                        let wt_entry = &self.wavetable.wavetable[idx];
+                        let buffer = &wt_entry.buffer;
+                        wt_entry.wavetable_eval(self.phasor) * ctx.volume
+                    }
                 };
-
             }
         } else {
             for x in out.iter_mut() {
@@ -110,7 +226,6 @@ pub fn run() -> Result<(), String> {
         samples: None,
     };
 
-
     let ring_buf = HeapRb::<AudioContext>::new(2);
     let (mut prod, cons) = ring_buf.split();
     
@@ -122,6 +237,7 @@ pub fn run() -> Result<(), String> {
 
         let phase_angle_step = 1.0f32 / WAVETABLE_SAMPLE_COUNT as f32;
         let sin_wavetable = (0..WAVETABLE_SAMPLE_COUNT).map(|i| (2.0 * PI * i as f32 * phase_angle_step).sin()).collect::<Vec<f32>>();
+        let saw_wavetable = Wavetable::new(Waveform::Sawtooth, 0.0);
 
         Oscillator {
             ctx: cons,
@@ -130,6 +246,7 @@ pub fn run() -> Result<(), String> {
             sample_rate: 44_100.0,
             phasor: 0.0,
             sin_wavetable,
+            wavetable: saw_wavetable,
         }
     })?;
 
@@ -169,6 +286,8 @@ pub fn run() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(Keycode::D), .. } => waveform = Waveform::Triangle,
                 Event::KeyDown { keycode: Some(Keycode::F), .. } => waveform = Waveform::Sawtooth,
                 Event::KeyDown { keycode: Some(Keycode::G), .. } => waveform = Waveform::SineWavetable,
+                /* sawtooth wavtable is broken */
+                Event::KeyDown { keycode: Some(Keycode::H), .. } => waveform = Waveform::SawtoothWavetable,
                 Event::Quit { .. }
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
@@ -218,3 +337,4 @@ pub fn run() -> Result<(), String> {
 
     Ok(())
 }
+
