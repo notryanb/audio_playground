@@ -1,29 +1,30 @@
 extern crate sdl2;
 use anyhow::{anyhow, bail, Result};
+use realfft::RealFftPlanner;
 use sdl2::audio::{AudioCallback, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
 use sdl2::pixels::Color;
-use sdl2::rect::{Point};
+use sdl2::rect::Point;
+use std::f32::consts::PI;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
-use std::f32::consts::PI;
 
-use ringbuf::{Consumer, Producer, HeapRb, SharedRb};
+use ringbuf::{Consumer, HeapRb, Producer, SharedRb};
 
 const WAVETABLE_SAMPLE_COUNT: usize = 512;
 const MIN_FREQ: f32 = 20.0;
 const WAVETABLE_SIZE: usize = 4096;
 
-pub struct Wavetable { 
+pub struct Wavetable {
     waveform: Waveform,
     wavetable: Vec<WavetableEntry>,
 }
 
 impl Wavetable {
     pub fn new(waveform: Waveform, sample_rate: f32) -> Self {
-        let nyquist = sample_rate / 2.0; 
+        let nyquist = sample_rate / 2.0;
         let mut freq = MIN_FREQ;
         let table_entry_len = (nyquist / MIN_FREQ).log2() as usize + 1;
         let mut wavetable: Vec<WavetableEntry> = Vec::with_capacity(table_entry_len);
@@ -65,7 +66,7 @@ impl WavetableEntry {
             buffer: WavetableEntry::generate_buffer(sample_rate, freq),
         }
     }
-    
+
     pub fn wavetable_eval(&self, phs: f32) -> f32 {
         if phs < 0.0 || phs >= 1.0 {
             return 0.0;
@@ -89,7 +90,7 @@ impl WavetableEntry {
     }
 
     pub fn generate_buffer(sample_rate: f32, freq: f32) -> Vec<f32> {
-        let nyquist = sample_rate / 2.0; 
+        let nyquist = sample_rate / 2.0;
         let step = 2.0 * PI / WAVETABLE_SIZE as f32;
         let mut max = 0.0;
         let mut buffer: Vec<f32> = Vec::with_capacity(WAVETABLE_SIZE);
@@ -101,7 +102,7 @@ impl WavetableEntry {
 
         for i in 0..WAVETABLE_SIZE {
             let phi = i as f32 * step;
-            
+
             /* Add up harmonics */
             buffer[i] = 0.0;
             for k in 1..(nyquist as usize) {
@@ -127,7 +128,6 @@ impl WavetableEntry {
         buffer
     }
 }
-
 
 #[derive(Copy, Clone)]
 enum Waveform {
@@ -171,7 +171,6 @@ impl Oscillator {
     }
 }
 
-
 impl AudioCallback for Oscillator {
     type Channel = f32;
 
@@ -184,7 +183,7 @@ impl AudioCallback for Oscillator {
                 *x = (2.0 * PI * ctx.freq * (self.i / self.sample_rate)).sin() * ctx.volume;
                 self.i += 1.0;
                 */
-                
+
                 self.phasor += ctx.freq / self.sample_rate;
 
                 // Clamp the phasor [0, 1);
@@ -197,8 +196,20 @@ impl AudioCallback for Oscillator {
 
                 *x = match ctx.waveform {
                     Waveform::Sine => (2.0 * PI * self.phasor).sin() * ctx.volume,
-                    Waveform::Square => if self.phasor < 0.5 { -1.0 * ctx.volume } else { 1.0 * ctx.volume },
-                    Waveform::Triangle => if self.phasor < 0.5 { (4.0 * self.phasor - 1.0) * ctx.volume} else { ((4.0 * (1.0 - self.phasor)) - 1.0) * ctx.volume },
+                    Waveform::Square => {
+                        if self.phasor < 0.5 {
+                            -1.0 * ctx.volume
+                        } else {
+                            1.0 * ctx.volume
+                        }
+                    }
+                    Waveform::Triangle => {
+                        if self.phasor < 0.5 {
+                            (4.0 * self.phasor - 1.0) * ctx.volume
+                        } else {
+                            ((4.0 * (1.0 - self.phasor)) - 1.0) * ctx.volume
+                        }
+                    }
                     Waveform::Sawtooth => (2.0 * self.phasor - 1.0) * ctx.volume,
                     Waveform::SineWavetable => self.wavetable_eval(self.phasor) * ctx.volume,
                     Waveform::SawtoothWavetable => {
@@ -222,12 +233,15 @@ impl AudioCallback for Oscillator {
 
 const SCREEN_WIDTH: i32 = 2048;
 const SCREEN_HEIGHT: i32 = 512;
+const RING_BUF_SIZE: usize = 2048;
 
 pub fn run() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     let audio_subsystem = sdl_context.audio()?;
     let sample_rate = 44_100.0;
+
+    let mut real_planner = RealFftPlanner::<f32>::new();
 
     let desired_spec = AudioSpecDesired {
         freq: Some(sample_rate as i32),
@@ -237,15 +251,17 @@ pub fn run() -> Result<(), String> {
 
     let ring_buf = HeapRb::<AudioContext>::new(2);
     let (mut prod, cons) = ring_buf.split();
-    
-    let audio_out_buf = HeapRb::<f32>::new(2048);
+
+    let audio_out_buf = HeapRb::<f32>::new(RING_BUF_SIZE);
     let (prod_out, mut cons_out) = audio_out_buf.split();
 
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
         println!("{:?}", spec);
 
         let phase_angle_step = 1.0f32 / WAVETABLE_SAMPLE_COUNT as f32;
-        let sin_wavetable = (0..WAVETABLE_SAMPLE_COUNT).map(|i| (2.0 * PI * i as f32 * phase_angle_step).sin()).collect::<Vec<f32>>();
+        let sin_wavetable = (0..WAVETABLE_SAMPLE_COUNT)
+            .map(|i| (2.0 * PI * i as f32 * phase_angle_step).sin())
+            .collect::<Vec<f32>>();
         let saw_wavetable = Wavetable::new(Waveform::Sawtooth, sample_rate);
 
         Oscillator {
@@ -290,12 +306,30 @@ pub fn run() -> Result<(), String> {
 
         for event in event_pump.poll_iter() {
             match event {
-                Event::KeyDown { keycode: Some(Keycode::A), .. } => waveform = Waveform::Sine,
-                Event::KeyDown { keycode: Some(Keycode::S), .. } => waveform = Waveform::Square,
-                Event::KeyDown { keycode: Some(Keycode::D), .. } => waveform = Waveform::Triangle,
-                Event::KeyDown { keycode: Some(Keycode::F), .. } => waveform = Waveform::Sawtooth,
-                Event::KeyDown { keycode: Some(Keycode::G), .. } => waveform = Waveform::SineWavetable,
-                Event::KeyDown { keycode: Some(Keycode::H), .. } => waveform = Waveform::SawtoothWavetable,
+                Event::KeyDown {
+                    keycode: Some(Keycode::A),
+                    ..
+                } => waveform = Waveform::Sine,
+                Event::KeyDown {
+                    keycode: Some(Keycode::S),
+                    ..
+                } => waveform = Waveform::Square,
+                Event::KeyDown {
+                    keycode: Some(Keycode::D),
+                    ..
+                } => waveform = Waveform::Triangle,
+                Event::KeyDown {
+                    keycode: Some(Keycode::F),
+                    ..
+                } => waveform = Waveform::Sawtooth,
+                Event::KeyDown {
+                    keycode: Some(Keycode::G),
+                    ..
+                } => waveform = Waveform::SineWavetable,
+                Event::KeyDown {
+                    keycode: Some(Keycode::H),
+                    ..
+                } => waveform = Waveform::SawtoothWavetable,
                 Event::Quit { .. }
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
@@ -331,13 +365,27 @@ pub fn run() -> Result<(), String> {
             _ = prod.push(new_ctx);
         }
 
-        
         let _out_len = cons_out.pop_slice(&mut scope[..]);
+        let fft_len = RING_BUF_SIZE;
+        let r2c = real_planner.plan_fft_forward(fft_len);
+        let mut spectrum = r2c.make_output_vec();
+        r2c.process(&mut scope[..], &mut spectrum)
+            .expect("failed to process FFT");
 
         canvas.set_draw_color(Color::RGB(100, 255, 100));
 
+        for (x, f) in spectrum.iter().enumerate() {
+            _ = canvas.draw_point(Point::new(
+                x as i32,
+                (((SCREEN_HEIGHT / 3) as f32 * 2.0) - f.re.abs()) as i32,
+            ));
+        }
+
         for (x, sample) in scope.iter().enumerate() {
-            canvas.draw_point(Point::new(x as i32, ((SCREEN_HEIGHT / 2) as f32 + (sample * 100.0)) as i32));
+            _ = canvas.draw_point(Point::new(
+                x as i32,
+                ((SCREEN_HEIGHT / 3) as f32 - (sample * 100.0)) as i32,
+            ));
         }
         canvas.present();
         prev_buttons = buttons;
@@ -345,4 +393,3 @@ pub fn run() -> Result<(), String> {
 
     Ok(())
 }
-
