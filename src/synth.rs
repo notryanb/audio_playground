@@ -231,9 +231,9 @@ impl AudioCallback for Oscillator {
     }
 }
 
-const SCREEN_WIDTH: i32 = 2048;
+const SCREEN_WIDTH: i32 = 1024;
 const SCREEN_HEIGHT: i32 = 512;
-const RING_BUF_SIZE: usize = 2048;
+const AUDIO_OUT_BUFFER_SIZE: usize = 1024;
 
 pub fn run() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
@@ -252,7 +252,7 @@ pub fn run() -> Result<(), String> {
     let ring_buf = HeapRb::<AudioContext>::new(2);
     let (mut prod, cons) = ring_buf.split();
 
-    let audio_out_buf = HeapRb::<f32>::new(RING_BUF_SIZE);
+    let audio_out_buf = HeapRb::<f32>::new(AUDIO_OUT_BUFFER_SIZE);
     let (prod_out, mut cons_out) = audio_out_buf.split();
 
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
@@ -298,7 +298,12 @@ pub fn run() -> Result<(), String> {
 
     let mut event_pump = sdl_context.event_pump()?;
     let mut waveform = Waveform::Sine;
-    let mut scope = (0..2048).map(|_| 0.0).collect::<Vec<f32>>();
+    let mut scope = (0..AUDIO_OUT_BUFFER_SIZE)
+        .map(|_| 0.0)
+        .collect::<Vec<f32>>();
+    let fft_len = AUDIO_OUT_BUFFER_SIZE;
+    let r2c = real_planner.plan_fft_forward(fft_len);
+    let mut spectrum = r2c.make_output_vec();
 
     'running: loop {
         canvas.set_draw_color(color);
@@ -366,9 +371,6 @@ pub fn run() -> Result<(), String> {
         }
 
         let _out_len = cons_out.pop_slice(&mut scope[..]);
-        let fft_len = RING_BUF_SIZE;
-        let r2c = real_planner.plan_fft_forward(fft_len);
-        let mut spectrum = r2c.make_output_vec();
         r2c.process(&mut scope[..], &mut spectrum)
             .expect("failed to process FFT");
 
@@ -376,7 +378,7 @@ pub fn run() -> Result<(), String> {
 
         for (x, f) in spectrum.iter().enumerate() {
             _ = canvas.draw_point(Point::new(
-                x as i32,
+                x as i32 + (SCREEN_WIDTH / 4) as i32,
                 (((SCREEN_HEIGHT / 3) as f32 * 2.0) - f.re.abs()) as i32,
             ));
         }
